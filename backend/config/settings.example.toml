@@ -1,0 +1,49 @@
+[app]
+name = "Multiomics GraphRAG Agent Platform"
+version = "0.1.0"
+environment = "local"
+debug = true
+api_prefix = "/api/v1"
+cors_origins = ["http://localhost:5173"]
+
+[postgres]
+url = "postgresql+asyncpg://postgres:postgres@localhost:5432/multiomics_graphrag"
+
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = ""
+database = "neo4j"
+node_embedding_index = "kg_node_embedding_index"
+node_embedding_property = "embedding"
+relationship_embedding_property = "embedding"
+
+[embedding]
+enabled = false
+provider = "openai-compatible"
+model = "text-embedding-3-small"
+base_url = ""
+api_key = ""
+dimensions = 1536
+batch_size = 100
+timeout_seconds = 60.0
+
+[rerank]
+enabled = false
+provider = "none"
+model = ""
+base_url = ""
+api_key = ""
+top_n = 20
+timeout_seconds = 60.0
+
+[fastagi]
+base_url = "https://deepexios.deepexi.com"
+chat_endpoint = "/api/openapi/chat/chat-messages"
+app_id = ""
+secret_key = ""
+agent_id = ""
+app_user = "nfyy"
+provider = "credentials"
+default_response_mode = "blocking"
+timeout_seconds = 900.0
