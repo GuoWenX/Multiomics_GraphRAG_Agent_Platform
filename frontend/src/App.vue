@@ -34,6 +34,7 @@ import {
   deleteExperimentDataset,
   getGraphRelationships,
   listExperimentDatasets,
+  previewOmicsFile,
   searchGraphNodes,
   streamAgentChat,
   updateExperimentDataset
@@ -65,7 +66,6 @@ const attachedDataset = ref(null);
 const chatDatasetLoadState = ref("idle");
 const messagesEnd = ref(null);
 const chatThread = ref(null);
-const chatFileInput = ref(null);
 
 const messages = computed({
   get() {
@@ -84,6 +84,9 @@ const datasetDisplayName = ref("");
 const datasetTopK = ref(100);
 const datasetStatus = ref({ type: "idle", message: "" });
 const isParsingDataset = ref(false);
+const isPreviewingDataset = ref(false);
+const datasetPreviewPlan = ref(null);
+const selectedDatasetComparisons = ref([]);
 const datasetStorageMode = ref("local");
 const previewDatasetId = ref(null);
 const datasetPreviewOpen = ref(false);
@@ -377,38 +380,6 @@ function selectDataset(dataset) {
   };
   datasetPickerOpen.value = false;
   uploadMenuOpen.value = false;
-}
-
-function openChatFilePicker() {
-  uploadMenuOpen.value = false;
-  datasetPickerOpen.value = false;
-  chatFileInput.value?.click();
-}
-
-async function handleChatFile(event) {
-  const file = event.target.files?.[0];
-  if (!file) {
-    return;
-  }
-  chatDatasetLoadState.value = "loading";
-  try {
-    const parsedDataset = await parseAndSaveDataset(file, 100);
-    if (parsedDataset) {
-      selectDataset(parsedDataset);
-      chatDatasetLoadState.value = "done";
-      window.setTimeout(() => {
-        if (chatDatasetLoadState.value === "done") {
-          chatDatasetLoadState.value = "idle";
-        }
-      }, 1800);
-    } else {
-      chatDatasetLoadState.value = "idle";
-    }
-  } catch {
-    chatDatasetLoadState.value = "idle";
-  } finally {
-    event.target.value = "";
-  }
 }
 
 function removeAttachment() {
@@ -727,7 +698,12 @@ function handleDatasetFile(event) {
     datasetDisplayName.value = getDefaultDatasetDisplayName(selectedDatasetFile.value);
   }
   event.target.value = "";
+  datasetPreviewPlan.value = null;
+  selectedDatasetComparisons.value = [];
   datasetStatus.value = { type: "idle", message: "" };
+  if (selectedDatasetFile.value) {
+    previewSelectedDataset();
+  }
 }
 
 async function parseSelectedDataset() {
@@ -735,9 +711,53 @@ async function parseSelectedDataset() {
     datasetStatus.value = { type: "error", message: "请先选择一个 .xlsx 文件。" };
     return;
   }
-  await parseAndSaveDataset(selectedDatasetFile.value, datasetTopK.value, datasetDisplayName.value);
+  if (!datasetPreviewPlan.value?.can_analyze) {
+    datasetStatus.value = { type: "error", message: "请先完成预检，并确认文件可以解析。" };
+    return;
+  }
+  const comparisons = selectedComparisonPayload();
+  if (!comparisons.length) {
+    datasetStatus.value = { type: "error", message: "请至少选择一个组间比较。" };
+    return;
+  }
+  await parseAndSaveDataset(selectedDatasetFile.value, datasetTopK.value, datasetDisplayName.value, comparisons);
   selectedDatasetFile.value = null;
   datasetDisplayName.value = "";
+  datasetPreviewPlan.value = null;
+  selectedDatasetComparisons.value = [];
+}
+
+async function previewSelectedDataset() {
+  if (!selectedDatasetFile.value) {
+    return;
+  }
+  if (!selectedDatasetFile.value.name.toLowerCase().endsWith(".xlsx")) {
+    datasetStatus.value = { type: "error", message: "仅支持上传 .xlsx 实验数据文件。" };
+    selectedDatasetFile.value = null;
+    return;
+  }
+  isPreviewingDataset.value = true;
+  datasetStatus.value = { type: "idle", message: "正在预检实验数据结构..." };
+  try {
+    const preview = await previewOmicsFile(selectedDatasetFile.value);
+    datasetPreviewPlan.value = preview;
+    selectedDatasetComparisons.value = (preview.comparisons || []).map(comparisonKey);
+    datasetStatus.value = preview.can_analyze
+      ? {
+          type: "success",
+          message: `预检通过：识别到 ${preview.groups?.length || 0} 个实验组、${preview.sheets?.length || 0} 个组学表。请选择要分析的组间比较。`
+        }
+      : {
+          type: "error",
+          message: "预检未通过，请根据提示调整 Excel 后重新上传。"
+        };
+  } catch (error) {
+    datasetPreviewPlan.value = null;
+    selectedDatasetComparisons.value = [];
+    datasetStatus.value = { type: "error", message: `预检失败：${error.message}` };
+  } finally {
+    isPreviewingDataset.value = false;
+  }
 }
 
 async function legacyParseAndSaveDataset(file, topK, displayName = "") {
@@ -784,16 +804,16 @@ function legacyDeleteDataset(datasetId) {
   saveDatasets();
 }
 
-async function parseAndSaveDataset(file, topK, displayName = "") {
+async function parseAndSaveDataset(file, topK, displayName = "", comparisons = []) {
   if (!file.name.toLowerCase().endsWith(".xlsx")) {
     datasetStatus.value = { type: "error", message: "仅支持上传 .xlsx 实验数据文件。" };
     return null;
   }
 
   isParsingDataset.value = true;
-  datasetStatus.value = { type: "idle", message: "正在解析实验数据..." };
+  datasetStatus.value = { type: "idle", message: "正在按所选组别解析实验数据..." };
   try {
-    const parsed = await analyzeOmicsFile(file, { top_n: Number(topK) || 100 });
+    const parsed = await analyzeOmicsFile(file, { top_n: Number(topK) || 100, comparisons });
     const payload = {
       display_name: displayName.trim() || getDefaultDatasetDisplayName(file),
       file_name: file.name,
@@ -802,7 +822,7 @@ async function parseAndSaveDataset(file, topK, displayName = "") {
       group_descriptions: parsed.group_descriptions || {},
       warnings: parsed.warnings || [],
       results: parsed.results || [],
-      metadata: { source: "xlsx-upload" }
+      metadata: { source: "xlsx-upload", comparisons }
     };
     let item;
     if (datasetStorageMode.value === "postgres") {
@@ -829,6 +849,23 @@ async function parseAndSaveDataset(file, topK, displayName = "") {
   } finally {
     isParsingDataset.value = false;
   }
+}
+
+function comparisonKey(comparison) {
+  return `${comparison.reference_group}__vs__${comparison.test_group}`;
+}
+
+function selectedComparisonPayload() {
+  const selected = new Set(selectedDatasetComparisons.value);
+  return (datasetPreviewPlan.value?.comparisons || [])
+    .filter((comparison) => selected.has(comparisonKey(comparison)))
+    .map(({ reference_group, test_group }) => ({ reference_group, test_group }));
+}
+
+function toggleAllDatasetComparisons(checked) {
+  selectedDatasetComparisons.value = checked
+    ? (datasetPreviewPlan.value?.comparisons || []).map(comparisonKey)
+    : [];
 }
 
 function startRenameDataset(dataset) {
@@ -2905,7 +2942,7 @@ function formatDate(value) {
               <button
                 class="icon-button"
                 type="button"
-                title="上传或选择实验数据"
+                title="选择已分析实验数据"
                 :disabled="isComposerLocked"
                 @click="uploadMenuOpen = !uploadMenuOpen"
               >
@@ -2916,10 +2953,6 @@ function formatDate(value) {
                 <button type="button" @click="datasetPickerOpen = !datasetPickerOpen">
                   <Database :size="17" />
                   选择已有实验数据
-                </button>
-                <button type="button" @click="openChatFilePicker">
-                  <UploadCloud :size="17" />
-                  上传本地 xlsx
                 </button>
               </div>
             </div>
@@ -2954,14 +2987,6 @@ function formatDate(value) {
             </button>
             <div v-if="!savedDatasets.length" class="empty-state">暂无已解析实验数据，请先到数据处理页面上传。</div>
           </div>
-
-          <input
-            ref="chatFileInput"
-            class="visually-hidden"
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            @change="handleChatFile"
-          />
         </footer>
         </div>
       </section>
@@ -3180,15 +3205,58 @@ function formatDate(value) {
               实验数据名称
               <input v-model="datasetDisplayName" type="text" placeholder="例如：SMPD3 干预组转录组" />
             </label>
-            <button class="primary-button dataset-save-button" type="button" :disabled="isParsingDataset" @click="parseSelectedDataset">
-              <Loader2 v-if="isParsingDataset" :size="18" class="spin" />
+            <button class="primary-button dataset-save-button" type="button" :disabled="isParsingDataset || isPreviewingDataset" @click="parseSelectedDataset">
+              <Loader2 v-if="isParsingDataset || isPreviewingDataset" :size="18" class="spin" />
               <FileSpreadsheet v-else :size="18" />
-              解析保存
+              生成组别分析
             </button>
           </div>
           <div v-if="selectedDatasetFile" class="selected-file">
             <FileSpreadsheet :size="17" />
             <span>{{ selectedDatasetFile.name }} · {{ formatFileSize(selectedDatasetFile.size) }}</span>
+          </div>
+          <div v-if="datasetPreviewPlan" class="dataset-analysis-plan">
+            <section>
+              <strong>识别到的实验组</strong>
+              <div class="dataset-chip-list">
+                <span v-for="group in datasetPreviewPlan.groups" :key="group">
+                  {{ group }}: {{ datasetPreviewPlan.group_descriptions?.[group] || "无描述" }}
+                </span>
+              </div>
+            </section>
+            <section>
+              <strong>可解析组学表</strong>
+              <div class="dataset-chip-list">
+                <span v-for="sheet in datasetPreviewPlan.sheets" :key="sheet.name">
+                  {{ sheet.name }} · {{ sheet.feature_count }} 个特征
+                </span>
+              </div>
+            </section>
+            <section v-if="datasetPreviewPlan.comparisons?.length">
+              <div class="dataset-analysis-plan-title">
+                <strong>选择组间比较</strong>
+                <label>
+                  <input
+                    type="checkbox"
+                    :checked="selectedDatasetComparisons.length === datasetPreviewPlan.comparisons.length"
+                    @change="toggleAllDatasetComparisons($event.target.checked)"
+                  />
+                  全选
+                </label>
+              </div>
+              <div class="dataset-comparison-options">
+                <label v-for="comparison in datasetPreviewPlan.comparisons" :key="comparisonKey(comparison)">
+                  <input v-model="selectedDatasetComparisons" type="checkbox" :value="comparisonKey(comparison)" />
+                  <span>{{ comparison.label }}</span>
+                </label>
+              </div>
+            </section>
+            <section v-if="datasetPreviewPlan.warnings?.length">
+              <strong>预检提示</strong>
+              <div class="dataset-warning-list">
+                <span v-for="warning in datasetPreviewPlan.warnings" :key="warning">{{ warning }}</span>
+              </div>
+            </section>
           </div>
           <div v-if="datasetStatus.message" :class="['status-message', datasetStatus.type]">
             {{ datasetStatus.message }}

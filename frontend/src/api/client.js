@@ -147,3 +147,20 @@ export async function analyzeOmicsFile(file, payload = {}) {
 
   return response.json();
 }
+
+export async function previewOmicsFile(file) {
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(`${API_BASE}/omics-stats/preview`, {
+    method: "POST",
+    body: form
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Request failed with ${response.status}`);
+  }
+
+  return response.json();
+}

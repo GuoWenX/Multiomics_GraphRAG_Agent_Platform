@@ -847,7 +847,7 @@ button {
 
 .dataset-save-button {
   flex: 0 0 auto;
-  min-width: 124px;
+  min-width: 148px;
   height: 38px;
   padding: 0 16px;
   border-color: #0f6b57;
@@ -858,6 +858,77 @@ button {
 
 .dataset-save-button svg {
   flex: 0 0 auto;
+}
+
+.dataset-analysis-plan {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.dataset-analysis-plan section {
+  display: grid;
+  gap: 8px;
+}
+
+.dataset-analysis-plan section > strong,
+.dataset-analysis-plan-title strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.dataset-analysis-plan-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dataset-analysis-plan-title label,
+.dataset-comparison-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dataset-analysis-plan input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--green);
+}
+
+.dataset-comparison-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.dataset-comparison-options label {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.dataset-warning-list {
+  display: grid;
+  gap: 6px;
+}
+
+.dataset-warning-list span {
+  border: 1px solid #edd9a3;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #fff8df;
+  color: #735b13;
+  font-size: 12px;
 }
 
 .datasets-workspace {

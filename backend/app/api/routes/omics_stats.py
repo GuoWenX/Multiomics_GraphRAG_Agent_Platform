@@ -4,7 +4,7 @@ import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from app.schemas.omics_stats import AnalyzeRequest, AnalyzeResponse, AnalyzeUrlRequest
+from app.schemas.omics_stats import AnalyzeRequest, AnalyzeResponse, AnalyzeUrlRequest, PreviewResponse
 from app.services.omics_stats_service import OmicsStatsService
 
 router = APIRouter()
@@ -12,6 +12,17 @@ router = APIRouter()
 
 def get_omics_stats_service() -> OmicsStatsService:
     return OmicsStatsService()
+
+
+@router.post("/preview", response_model=PreviewResponse)
+async def preview(
+    file: UploadFile = File(...),
+    service: OmicsStatsService = Depends(get_omics_stats_service),
+) -> PreviewResponse:
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are supported")
+    content = await file.read()
+    return service.preview_content(content)
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)

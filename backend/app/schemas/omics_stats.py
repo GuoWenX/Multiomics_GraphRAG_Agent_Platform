@@ -30,6 +30,27 @@ class AnalyzeUrlRequest(AnalyzeRequest):
     file_url: str
 
 
+class OmicsSheetPreview(BaseModel):
+    name: str
+    feature_count: int
+    groups: list[str]
+
+
+class ComparisonOption(BaseModel):
+    reference_group: str
+    test_group: str
+    label: str
+
+
+class PreviewResponse(BaseModel):
+    group_descriptions: dict[str, str]
+    warnings: list[str]
+    sheets: list[OmicsSheetPreview]
+    groups: list[str]
+    comparisons: list[ComparisonOption]
+    can_analyze: bool
+
+
 class AnalyzeResponse(BaseModel):
     group_descriptions: dict[str, str]
     warnings: list[str]
