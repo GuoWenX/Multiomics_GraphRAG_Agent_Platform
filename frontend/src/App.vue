@@ -8,6 +8,7 @@ import {
   CircleDot,
   Database,
   Dna,
+  Download,
   FileText,
   FileSpreadsheet,
   FlaskConical,
@@ -3154,12 +3155,22 @@ function formatDate(value) {
             <h2>上传并解析多组学实验数据</h2>
           </div>
           <div class="upload-actions">
-            <label class="upload-field">
+            <label class="upload-field dataset-file-field">
               xlsx 文件
-              <button class="primary-button dataset-file-button" type="button" @click="chooseDatasetFile">
-                <UploadCloud :size="18" />
-                选择 xlsx
-              </button>
+              <span class="dataset-file-actions">
+                <button class="primary-button dataset-file-button" type="button" @click="chooseDatasetFile">
+                  <UploadCloud :size="18" />
+                  选择 xlsx
+                </button>
+                <a
+                  class="secondary-button dataset-template-button"
+                  href="/templates/multiomics-experiment-template.xlsx"
+                  download="多组学实验数据模板.xlsx"
+                >
+                  <Download :size="18" />
+                  下载模板
+                </a>
+              </span>
             </label>
             <label class="upload-field">
               返回 TOPK
