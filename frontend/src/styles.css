@@ -81,6 +81,12 @@ button {
   color: var(--green-dark);
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  color: #7b857c;
+  background: #eef1ed;
+}
+
 .brand strong,
 .brand span {
   display: block;
@@ -407,6 +413,58 @@ button {
   backdrop-filter: blur(14px);
 }
 
+.dataset-load-toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid #bfd5c8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--green-dark);
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 18px 44px rgba(24, 38, 28, 0.18);
+  transform: translateX(-50%);
+  z-index: 20;
+}
+
+.dataset-load-toast.is-loading {
+  border-color: #a8c6b4;
+  background: #eef6f1;
+}
+
+.dataset-load-toast.is-done {
+  border-color: #9dc7b4;
+  background: #e8f7ef;
+}
+
+.session-dataset-loaded {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0 auto 10px;
+  padding: 8px 10px;
+  border: 1px solid #d6e1d9;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--green-dark);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.session-dataset-loaded span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .attached-file {
   width: 100%;
   margin: 0 auto 10px;
@@ -460,6 +518,12 @@ button {
   outline: 0;
   color: var(--ink);
   line-height: 1.5;
+}
+
+.composer textarea:disabled {
+  cursor: not-allowed;
+  color: #7b857c;
+  background: transparent;
 }
 
 .upload-control {

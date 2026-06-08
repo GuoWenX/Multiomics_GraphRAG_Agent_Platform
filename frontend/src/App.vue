@@ -31,6 +31,7 @@ import {
   analyzeOmicsFile,
   createExperimentDataset,
   deleteExperimentDataset,
+  getGraphRelationships,
   listExperimentDatasets,
   searchGraphNodes,
   streamAgentChat,
@@ -56,9 +57,11 @@ const chatMessagesBySession = ref({
 });
 const input = ref("");
 const isSending = ref(false);
+const pageEnteredAt = Date.now();
 const uploadMenuOpen = ref(false);
 const datasetPickerOpen = ref(false);
 const attachedDataset = ref(null);
+const chatDatasetLoadState = ref("idle");
 const messagesEnd = ref(null);
 const chatThread = ref(null);
 const chatFileInput = ref(null);
@@ -110,8 +113,11 @@ const isGraphMinimapDragging = ref(false);
 const hoveredGraphItem = ref(null);
 const selectedGraphItem = ref(null);
 const graphTooltip = ref(null);
-const GRAPH_NODE_LONG_PRESS_MS = 360;
+const GRAPH_NODE_LONG_PRESS_MS = 100;
 const GRAPH_NODE_LONG_PRESS_MOVE_TOLERANCE = 9;
+const GRAPH_CORE_DISTANCE = 520;
+const GRAPH_CORE_FIRST_HOP_RATIO = 0.3;
+const GRAPH_CORE_HOP_RATIO_STEP = 0.1;
 const CHAT_SCROLL_BOTTOM_PADDING = 4;
 let graphAnimationFrame = 0;
 let graphAnimationStartedAt = 0;
@@ -124,6 +130,9 @@ let suppressNextGraphClick = false;
 
 const pageTitle = computed(() => modules.find((item) => item.id === activeModule.value)?.label || "多组学机制问答智能体");
 const savedDatasets = computed(() => datasets.value);
+const activeChatSession = computed(() => chatSessions.value.find((session) => session.id === activeChatSessionId.value) || null);
+const activeSessionDataset = computed(() => activeChatSession.value?.loadedDataset || null);
+const isComposerLocked = computed(() => isSending.value || chatDatasetLoadState.value === "loading");
 const previewDataset = computed(() => datasets.value.find((dataset) => dataset.id === previewDatasetId.value) || null);
 const previewDatasetGroups = computed(() => getDatasetPreviewGroups(previewDataset.value));
 const activeDatasetPreviewGroup = computed(() => {
@@ -201,6 +210,7 @@ function startNewChat() {
   chatMessagesBySession.value[sessionId] = [createWelcomeMessage()];
   input.value = "";
   attachedDataset.value = null;
+  chatDatasetLoadState.value = "idle";
   uploadMenuOpen.value = false;
   datasetPickerOpen.value = false;
   nextTick(scrollToBottom);
@@ -210,6 +220,8 @@ function openChatSession(sessionId) {
   activeModule.value = "chat";
   activeChatSessionId.value = sessionId;
   ensureSessionMessages(sessionId);
+  attachedDataset.value = null;
+  chatDatasetLoadState.value = "idle";
   uploadMenuOpen.value = false;
   datasetPickerOpen.value = false;
   saveChatSessions();
@@ -254,7 +266,7 @@ function loadChatSessions() {
   try {
     const saved = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || "null");
     if (saved?.sessions?.length && saved?.messagesBySession) {
-      chatSessions.value = saved.sessions;
+      chatSessions.value = saved.sessions.map(normalizeChatSession);
       chatMessagesBySession.value = {
         ...saved.messagesBySession,
         [activeChatSessionId.value]: [createWelcomeMessage()]
@@ -293,17 +305,59 @@ function createWelcomeMessage() {
   };
 }
 
+function normalizeChatSession(session) {
+  const fallbackTime = new Date().toISOString();
+  return {
+    ...session,
+    createdAt: session.createdAt || session.updatedAt || fallbackTime
+  };
+}
+
 function ensureChatSessionRecord(sessionId, query) {
   let session = chatSessions.value.find((item) => item.id === sessionId);
   if (!session) {
+    const now = new Date().toISOString();
     session = {
       id: sessionId,
       title: query.slice(0, 18) || "新会话",
-      time: "刚刚"
+      createdAt: now
     };
     chatSessions.value.unshift(session);
   }
   return session;
+}
+
+function formatSessionTime(session) {
+  const createdAt = new Date(session.createdAt || Date.now()).getTime();
+  const elapsedSeconds = Math.max(0, Math.floor((pageEnteredAt - createdAt) / 1000));
+  if (elapsedSeconds < 60) {
+    return "最近";
+  }
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m`;
+  }
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return `${elapsedHours}h`;
+  }
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 30) {
+    return `${elapsedDays}d`;
+  }
+  return `${Math.floor(elapsedDays / 30)}months`;
+}
+
+function markSessionDatasetLoaded(sessionId, dataset) {
+  const session = ensureChatSessionRecord(sessionId, "");
+  session.loadedDataset = dataset
+    ? {
+        id: dataset.id,
+        name: dataset.name,
+        meta: dataset.meta
+      }
+    : null;
+  saveChatSessions();
 }
 
 function renderMarkdown(content) {
@@ -333,12 +387,25 @@ async function handleChatFile(event) {
   if (!file) {
     return;
   }
-  await parseAndSaveDataset(file, 100);
-  const latest = datasets.value[0];
-  if (latest) {
-    selectDataset(latest);
+  chatDatasetLoadState.value = "loading";
+  try {
+    const parsedDataset = await parseAndSaveDataset(file, 100);
+    if (parsedDataset) {
+      selectDataset(parsedDataset);
+      chatDatasetLoadState.value = "done";
+      window.setTimeout(() => {
+        if (chatDatasetLoadState.value === "done") {
+          chatDatasetLoadState.value = "idle";
+        }
+      }, 1800);
+    } else {
+      chatDatasetLoadState.value = "idle";
+    }
+  } catch {
+    chatDatasetLoadState.value = "idle";
+  } finally {
+    event.target.value = "";
   }
-  event.target.value = "";
 }
 
 function removeAttachment() {
@@ -347,7 +414,7 @@ function removeAttachment() {
 
 async function sendMessage() {
   const query = input.value.trim();
-  if (!query || isSending.value) {
+  if (!query || isComposerLocked.value) {
     return;
   }
 
@@ -363,9 +430,6 @@ async function sendMessage() {
   if (activeSession && activeSession.title === "新会话") {
     activeSession.title = query.slice(0, 18);
   }
-  if (activeSession) {
-    activeSession.time = "刚刚";
-  }
   input.value = "";
   uploadMenuOpen.value = false;
   datasetPickerOpen.value = false;
@@ -377,6 +441,13 @@ async function sendMessage() {
   try {
     const selectedDataset = findAttachedDataset();
     const agentQuery = buildAgentQuery(query, selectedDataset);
+    const datasetForRequest = attachedDataset.value && selectedDataset
+      ? {
+          id: attachedDataset.value.id,
+          name: attachedDataset.value.name,
+          meta: attachedDataset.value.meta
+        }
+      : null;
     assistantIndex = appendSessionMessage(sessionId, {
       id: Date.now() + 1,
       role: "assistant",
@@ -389,11 +460,11 @@ async function sendMessage() {
 
     await streamAgentChat({
       query: agentQuery,
-      inputs: attachedDataset.value
+      inputs: datasetForRequest
         ? {
             dataset: {
-              id: attachedDataset.value.id,
-              name: attachedDataset.value.name,
+              id: datasetForRequest.id,
+              name: datasetForRequest.name,
               file_name: selectedDataset?.fileName || selectedDataset?.name || "",
               type: attachedDataset.value.type,
               included_in_query: Boolean(selectedDataset)
@@ -431,6 +502,12 @@ async function sendMessage() {
       });
     } else {
       updateSessionMessage(sessionId, assistantIndex, { status: "done" });
+    }
+    if (datasetForRequest) {
+      markSessionDatasetLoaded(sessionId, datasetForRequest);
+      if (activeChatSessionId.value === sessionId) {
+        attachedDataset.value = null;
+      }
     }
   } catch (error) {
     const errorContent = "请求失败：" + error.message;
@@ -888,6 +965,11 @@ async function runGraphSearch() {
       });
       addGraphSearchResult(query, response);
       warnings.push(...(response.warnings || []));
+      const proteinInteractionResponse = await fetchProteinInteractionGraph(query);
+      if (proteinInteractionResponse) {
+        addGraphSearchResult(query, proteinInteractionResponse);
+        warnings.push(...(proteinInteractionResponse.warnings || []));
+      }
     }
     recomputeGraphData(warnings);
     stageGraphReveal(previousNodeIds);
@@ -898,6 +980,32 @@ async function runGraphSearch() {
   } catch (error) {
     graphData.value = { ...graphData.value, warnings: [error.message] };
     graphStatus.value = "error";
+  }
+}
+
+async function fetchProteinInteractionGraph(query) {
+  try {
+    const response = await getGraphRelationships({
+      name: query,
+      relationship_type: "PROTEIN_INTERACTS_WITH",
+      labels: ["Protein"],
+      target_labels: ["Protein"],
+      direction: "both",
+      limit: graphLimit,
+      include_properties: true
+    });
+    if (!response.nodes?.length && !response.relationships?.length) {
+      return null;
+    }
+    return response;
+  } catch (error) {
+    return {
+      query,
+      matched_nodes: [],
+      nodes: [],
+      relationships: [],
+      warnings: [`蛋白互作网络加载失败：${error.message}`]
+    };
   }
 }
 
@@ -915,8 +1023,8 @@ function getGraphSearchDepth() {
 function addGraphSearchResult(query, response) {
   const nodes = response.nodes || response.matched_nodes || [];
   const relationships = response.relationships || [];
-  const matchedNodes = response.matched_nodes?.length ? response.matched_nodes : nodes.filter((node) => sameGraphName(node.name, query));
-  const anchors = matchedNodes.length ? matchedNodes : nodes.slice(0, 1);
+  const matchedNodes = response.matched_nodes?.length ? response.matched_nodes : findGraphSearchAnchorNodes(nodes, query);
+  const anchors = matchedNodes.length ? selectGraphCoreCandidates(matchedNodes) : nodes.slice(0, 1);
   anchors.forEach((node) => {
     if (!node?.id) {
       return;
@@ -939,8 +1047,27 @@ function addGraphSearchResult(query, response) {
   });
 }
 
+function findGraphSearchAnchorNodes(nodes, query) {
+  const exactMatches = nodes.filter((node) => sameGraphName(node.name, query));
+  const typedMatches = exactMatches.filter((node) => ["Gene", "Protein"].includes(getNodeType(node)));
+  if (typedMatches.length >= 2) {
+    return typedMatches;
+  }
+  const queryKey = normalizeGraphName(query);
+  const compatibleMatches = nodes.filter((node) => {
+    const nodeKey = normalizeGraphName(node.name);
+    return nodeKey === queryKey || nodeKey === `${queryKey}gene` || nodeKey === `${queryKey}protein`;
+  });
+  const compatibleTypedMatches = compatibleMatches.filter((node) => ["Gene", "Protein"].includes(getNodeType(node)));
+  return compatibleTypedMatches.length ? compatibleTypedMatches : exactMatches;
+}
+
 function sameGraphName(value, query) {
-  return String(value || "").trim().toLowerCase() === String(query || "").trim().toLowerCase();
+  return normalizeGraphName(value) === normalizeGraphName(query);
+}
+
+function normalizeGraphName(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 function recomputeGraphData(extraWarnings = []) {
@@ -1082,15 +1209,15 @@ function buildGraphCanvasScene(nodes, relationships, previousNodeIds, state) {
   const centerX = width / 2;
   const centerY = height / 2;
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const cores = graphAnchors.value.map((anchor) => nodeById.get(anchor.id)).filter(Boolean).slice(0, 2);
+  const cores = selectGraphCoreCandidates(graphAnchors.value.map((anchor) => nodeById.get(anchor.id)).filter(Boolean));
   const coreIds = new Set(cores.map((node) => node.id));
   const adjacency = buildGraphAdjacency(relationships);
   const distancesByCore = new Map(cores.map((core) => [core.id, getHopDistances(core.id, relationships)]));
   const degreeByNode = countGraphDegrees(nodes, relationships);
-  const pathRelationshipIds = findBridgeRelationshipIds(graphAnchors.value.slice(0, 2), relationships);
+  const pathRelationshipIds = findBridgeRelationshipIds(cores.map((node) => ({ id: node.id })), relationships);
   const pathNodeIds = findPathNodeIds(pathRelationshipIds, relationships);
   const roles = classifyCanvasNodeRoles(nodes, cores, distancesByCore, pathNodeIds);
-  const corePositions = getCanvasCorePositions(cores.length, centerX, centerY);
+  const corePositions = getCanvasCorePositions(cores.length, centerX, centerY, roles);
   const semanticLayout = createCanvasSemanticLayout(nodes, cores, corePositions, distancesByCore, adjacency, roles);
   const modelNodes = nodes.map((node) => {
     const role = roles.get(node.id) || "context";
@@ -1277,22 +1404,14 @@ function createCanvasSemanticLayout(nodes, cores, corePositions, distancesByCore
 }
 
 function computeSecondaryCoreTarget(nodeId, index, total, corePosition, coreCount, coreIndex) {
-  const slotCount = Math.min(12, Math.max(1, total));
-  const ring = Math.floor(index / slotCount);
-  const slot = index % slotCount;
-  const radius = 260 + ring * 170;
-  const ringOffset = ring ? Math.PI / slotCount : 0;
-  let angle;
-  if (coreCount > 1) {
-    const spread = Math.PI * 0.9;
-    const start = coreIndex === 0 ? Math.PI * 0.55 : -Math.PI * 0.45;
-    angle = start + (slotCount <= 1 ? 0 : (spread * slot) / Math.max(1, slotCount - 1)) + ringOffset;
-  } else {
-    angle = -Math.PI / 2 + (Math.PI * 2 * slot) / slotCount + ringOffset;
-  }
-  const jitter = Math.sin(getStableNodeAngle(nodeId)) * 18;
+  const slotsPerRing = 12;
+  const ring = Math.floor(index / slotsPerRing);
+  const slot = index % slotsPerRing;
+  const radius = getGraphHopDistance(1 + ring);
+  const ringOffset = ring * (Math.PI / 12);
+  const angle = -Math.PI / 2 + (Math.PI * 2 * slot) / slotsPerRing + ringOffset;
   return {
-    x: corePosition.x + Math.cos(angle) * (radius + jitter),
+    x: corePosition.x + Math.cos(angle) * radius,
     y: corePosition.y + Math.sin(angle) * radius
   };
 }
@@ -1324,14 +1443,93 @@ function findSecondaryParentId(nodeId, ownerIndex, adjacency, roles, ownerCoreIn
   return best?.depth === 1 ? best.id : null;
 }
 
-function getCanvasCorePositions(coreCount, centerX, centerY) {
+function getGraphHopDistance(depth) {
+  const normalizedDepth = Math.max(1, Number(depth) || 1);
+  return GRAPH_CORE_DISTANCE * (GRAPH_CORE_FIRST_HOP_RATIO + (normalizedDepth - 1) * GRAPH_CORE_HOP_RATIO_STEP);
+}
+
+function sortGraphCoreCandidates(nodes) {
+  return [...nodes].sort((left, right) => {
+    const leftTypeRank = getGraphCoreTypeRank(left);
+    const rightTypeRank = getGraphCoreTypeRank(right);
+    if (leftTypeRank !== rightTypeRank) {
+      return leftTypeRank - rightTypeRank;
+    }
+    const leftName = normalizeGraphName(left?.name);
+    const rightName = normalizeGraphName(right?.name);
+    if (leftName !== rightName) {
+      return leftName.localeCompare(rightName);
+    }
+    return String(left?.id || "").localeCompare(String(right?.id || ""));
+  });
+}
+
+function selectGraphCoreCandidates(nodes) {
+  const sortedNodes = sortGraphCoreCandidates(nodes);
+  const geneProteinPair = findGeneProteinCorePair(sortedNodes);
+  if (geneProteinPair.length) {
+    return geneProteinPair;
+  }
+  return sortedNodes.slice(0, 2);
+}
+
+function findGeneProteinCorePair(nodes) {
+  const geneByName = new Map();
+  const proteinByName = new Map();
+  nodes.forEach((node) => {
+    const baseName = getGraphEntityBaseName(node);
+    if (!baseName) {
+      return;
+    }
+    const type = getNodeType(node);
+    if (type === "Gene" && !geneByName.has(baseName)) {
+      geneByName.set(baseName, node);
+    }
+    if (type === "Protein" && !proteinByName.has(baseName)) {
+      proteinByName.set(baseName, node);
+    }
+  });
+  const pairedName = [...geneByName.keys()].find((name) => proteinByName.has(name));
+  return pairedName ? [geneByName.get(pairedName), proteinByName.get(pairedName)] : [];
+}
+
+function getGraphEntityBaseName(node) {
+  return normalizeGraphName(node?.name).replace(/(gene|protein)$/i, "");
+}
+
+function getGraphCoreTypeRank(node) {
+  const type = getNodeType(node);
+  if (type === "Gene") {
+    return 0;
+  }
+  if (type === "Protein") {
+    return 1;
+  }
+  return 2;
+}
+
+function getCanvasCorePositions(coreCount, centerX, centerY, roles = new Map()) {
   if (coreCount <= 1) {
     return [{ x: centerX, y: centerY }];
   }
+  const halfDistance = getCanvasCoreDistance(roles) / 2;
   return [
-    { x: centerX - 240, y: centerY },
-    { x: centerX + 240, y: centerY }
+    { x: centerX - halfDistance, y: centerY },
+    { x: centerX + halfDistance, y: centerY }
   ];
+}
+
+function getCanvasCoreDistance(roles) {
+  const extraRings = Math.max(
+    getCanvasCoreExtraRings(roles, "secondaryCoreA"),
+    getCanvasCoreExtraRings(roles, "secondaryCoreB")
+  );
+  return GRAPH_CORE_DISTANCE * (1 + extraRings * GRAPH_CORE_HOP_RATIO_STEP);
+}
+
+function getCanvasCoreExtraRings(roles, secondaryRole) {
+  const nodeCount = [...roles.values()].filter((role) => role === secondaryRole).length;
+  return Math.max(0, Math.ceil(nodeCount / 12) - 1);
 }
 
 function computeCanvasNodeTarget(node, role, depth, cores, corePositions, distancesByCore, adjacency, nodes, semanticLayout) {
@@ -1380,7 +1578,7 @@ function computeCanvasNodeTarget(node, role, depth, cores, corePositions, distan
   }
   const owner = findNearestCorePosition(node.id, cores, corePositions, distancesByCore) || corePositions[0] || { x: 800, y: 450 };
   const side = role === "clusterA" ? -1 : role === "clusterB" ? 1 : Math.sign(nodeIndex % 2 ? 1 : -1);
-  const baseRadius = depth <= 1 ? 210 : depth === 2 ? 390 : 540;
+  const baseRadius = getGraphHopDistance(depth);
   const spread = role === "clusterA" ? Math.PI * 0.95 : role === "clusterB" ? Math.PI * 0.95 : Math.PI * 1.7;
   const start = role === "clusterA" ? Math.PI * 0.55 : role === "clusterB" ? -Math.PI * 0.45 : -Math.PI * 0.85;
   const siblings = nodes.filter((item) => {
@@ -2076,9 +2274,10 @@ function createGraphSpringDragNodes(coreNode) {
   const group = getCoreDragGroup(coreNode);
   return group.map((node, index) => {
     const isPrimary = node.id === coreNode.id;
+    const isFirstHopFollower = !isPrimary && (isCanvasSecondaryCoreRole(node.role) || isNodeWithinCoreNeighborhood(coreNode.id, node.id, 1));
     const angle = getStableNodeAngle(`${coreNode.id}-${node.id}`);
     const distanceFromCore = Math.hypot(node.x - coreNode.x, node.y - coreNode.y);
-    const delay = isPrimary ? 0 : Math.min(220, 45 + index * 18 + (distanceFromCore / 420) * 80);
+    const delay = isPrimary ? 0 : isFirstHopFollower ? Math.min(90, 18 + index * 7) : Math.min(220, 45 + index * 18 + (distanceFromCore / 420) * 80);
     return {
       id: node.id,
       isPrimary,
@@ -2087,10 +2286,10 @@ function createGraphSpringDragNodes(coreNode) {
       vx: 0,
       vy: 0,
       delay,
-      stiffness: isPrimary ? 1 : 0.085 + (Math.sin(angle) + 1) * 0.025,
-      damping: isPrimary ? 1 : 0.76 + (Math.cos(angle) + 1) * 0.045,
-      reboundX: isPrimary ? 0 : Math.cos(angle) * (4 + (index % 4) * 2.2),
-      reboundY: isPrimary ? 0 : Math.sin(angle) * (4 + (index % 3) * 2.4)
+      stiffness: isPrimary ? 1 : isFirstHopFollower ? 0.18 + (Math.sin(angle) + 1) * 0.035 : 0.085 + (Math.sin(angle) + 1) * 0.025,
+      damping: isPrimary ? 1 : isFirstHopFollower ? 0.62 + (Math.cos(angle) + 1) * 0.035 : 0.76 + (Math.cos(angle) + 1) * 0.045,
+      reboundX: isPrimary ? 0 : Math.cos(angle) * (isFirstHopFollower ? 12 + (index % 4) * 3 : 4 + (index % 4) * 2.2),
+      reboundY: isPrimary ? 0 : Math.sin(angle) * (isFirstHopFollower ? 12 + (index % 3) * 3 : 4 + (index % 3) * 2.4)
     };
   });
 }
@@ -2126,7 +2325,7 @@ function stepGraphSpringDrag(timestamp) {
     const targetX = dragged.startX + state.deltaX * easedProgress + dragged.reboundX * reboundDecay;
     const targetY = dragged.startY + state.deltaY * easedProgress + dragged.reboundY * reboundDecay;
 
-    if (dragged.isPrimary && !state.released) {
+    if (dragged.isPrimary) {
       node.x = dragged.startX + state.deltaX;
       node.y = dragged.startY + state.deltaY;
       node.targetX = node.x;
@@ -2143,18 +2342,37 @@ function stepGraphSpringDrag(timestamp) {
     }
 
     graphNodePositions.value[node.id] = { x: node.x, y: node.y };
-    if (Math.hypot(node.x - targetX, node.y - targetY) > 0.7 || Math.hypot(dragged.vx, dragged.vy) > 0.08 || delayedProgress < 1) {
+    if (!dragged.isPrimary && (Math.hypot(node.x - targetX, node.y - targetY) > 0.7 || Math.hypot(dragged.vx, dragged.vy) > 0.08 || delayedProgress < 1)) {
       moving = true;
     }
   });
 
   drawGraphScene();
   drawGraphMinimap();
-  if (state.released && !moving) {
+  if (state.released && (!moving || releaseElapsed > 720)) {
+    settleGraphSpringDrag(state);
     graphDragState.value = null;
     return;
   }
   graphSpringFrame = requestAnimationFrame(stepGraphSpringDrag);
+}
+
+function settleGraphSpringDrag(state) {
+  state.draggedNodes.forEach((dragged) => {
+    const node = graphScene.value.nodes.find((item) => item.id === dragged.id);
+    if (!node) {
+      return;
+    }
+    const targetX = dragged.startX + state.deltaX;
+    const targetY = dragged.startY + state.deltaY;
+    node.x = targetX;
+    node.y = targetY;
+    node.targetX = targetX;
+    node.targetY = targetY;
+    graphNodePositions.value[node.id] = { x: targetX, y: targetY };
+  });
+  drawGraphScene();
+  drawGraphMinimap();
 }
 
 function releaseGraphSpringDrag(state) {
@@ -2341,17 +2559,23 @@ function moveGraphPan(event) {
   }
   const state = graphDragState.value;
   if (state.kind === "pending-node") {
-    const moveDistance = Math.hypot(event.clientX - state.startClientX, event.clientY - state.startClientY);
-    if (moveDistance > GRAPH_NODE_LONG_PRESS_MOVE_TOLERANCE) {
-      state.cancelled = true;
-      clearGraphNodeLongPressTimer();
-    }
     const pointer = getGraphPointer(event);
     state.deltaX = pointer.worldX - state.startWorldX;
     state.deltaY = pointer.worldY - state.startWorldY;
+    if (Math.hypot(event.clientX - state.startClientX, event.clientY - state.startClientY) > GRAPH_NODE_LONG_PRESS_MOVE_TOLERANCE) {
+      state.startWorldX = pointer.worldX;
+      state.startWorldY = pointer.worldY;
+      state.deltaX = 0;
+      state.deltaY = 0;
+      state.startClientX = event.clientX;
+      state.startClientY = event.clientY;
+    }
     return;
   }
   if (state.kind === "node") {
+    if (state.released) {
+      return;
+    }
     const pointer = getGraphPointer(event);
     state.deltaX = pointer.worldX - state.startWorldX;
     state.deltaY = pointer.worldY - state.startWorldY;
@@ -2610,7 +2834,7 @@ function formatDate(value) {
           >
             <Bot :size="16" />
             <span>{{ session.title }}</span>
-            <small>{{ session.time }}</small>
+            <small>{{ formatSessionTime(session) }}</small>
           </button>
         </aside>
 
@@ -2641,6 +2865,22 @@ function formatDate(value) {
         </div>
 
         <footer class="composer-panel">
+          <div
+            v-if="chatDatasetLoadState !== 'idle'"
+            :class="['dataset-load-toast', chatDatasetLoadState === 'done' ? 'is-done' : 'is-loading']"
+            role="status"
+            aria-live="polite"
+          >
+            <Loader2 v-if="chatDatasetLoadState === 'loading'" :size="16" class="spin" />
+            <FileSpreadsheet v-else :size="16" />
+            <span>{{ chatDatasetLoadState === "loading" ? "实验数据载入中" : "实验数据载入已完成" }}</span>
+          </div>
+
+          <div v-if="activeSessionDataset" class="session-dataset-loaded">
+            <FileSpreadsheet :size="17" />
+            <span>{{ activeSessionDataset.name }}实验数据已载入当前会话</span>
+          </div>
+
           <div v-if="attachedDataset" class="attached-file">
             <FileSpreadsheet :size="17" />
             <div>
@@ -2658,6 +2898,7 @@ function formatDate(value) {
                 class="icon-button"
                 type="button"
                 title="上传或选择实验数据"
+                :disabled="isComposerLocked"
                 @click="uploadMenuOpen = !uploadMenuOpen"
               >
                 <Paperclip :size="18" />
@@ -2680,10 +2921,11 @@ function formatDate(value) {
               rows="1"
               placeholder="输入多组学机制问题，按 Enter 发送，Shift + Enter 换行"
               aria-label="多组学机制问题输入框"
+              :disabled="isComposerLocked"
               @keydown="handleComposerKeydown"
             />
 
-            <button class="send-button" type="button" :disabled="!input.trim() || isSending" @click="sendMessage">
+            <button class="send-button" type="button" :disabled="!input.trim() || isComposerLocked" @click="sendMessage">
               <Loader2 v-if="isSending" :size="18" class="spin" />
               <Send v-else :size="18" />
             </button>

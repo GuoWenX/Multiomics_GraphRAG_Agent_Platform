@@ -28,6 +28,13 @@ export function searchGraphNodes(payload) {
   });
 }
 
+export function getGraphRelationships(payload) {
+  return request("/graph/relationships/connected", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function sendAgentChat(payload) {
   return request("/agent/chat", {
     method: "POST",
