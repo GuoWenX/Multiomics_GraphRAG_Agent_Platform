@@ -144,15 +144,22 @@ class GraphRepository:
         query = """
         MATCH (n)
         WHERE ($labels = [] OR any(label IN labels(n) WHERE label IN $labels))
-          AND any(value IN [
-            n.name,
-            n.title,
-            n.symbol,
-            n.id,
-            n.vid,
-            n.description,
-            n.type
-          ] WHERE value IS NOT NULL AND toLower(toString(value)) CONTAINS toLower($keyword))
+          AND (
+            any(value IN [
+              n.name,
+              n.title,
+              n.symbol,
+              n.id,
+              n.vid,
+              n.gene_full_name,
+              n.alias,
+              n.synonym,
+              n.description,
+              n.type
+            ] WHERE value IS NOT NULL AND toLower(toString(value)) CONTAINS toLower($keyword))
+            OR any(value IN coalesce(n.aliases, []) + coalesce(n.synonyms, [])
+              WHERE value IS NOT NULL AND toLower(toString(value)) CONTAINS toLower($keyword))
+          )
         RETURN n
         ORDER BY
           CASE
@@ -493,13 +500,20 @@ class GraphRepository:
 
 def exact_name_predicate(variable: str, parameter: str) -> str:
     return f"""
-        any(value IN [
-            {variable}.name,
-            {variable}.title,
-            {variable}.symbol,
-            {variable}.id,
-            {variable}.vid
-        ] WHERE value IS NOT NULL AND toLower(toString(value)) = toLower({parameter}))
+        (
+            any(value IN [
+                {variable}.name,
+                {variable}.title,
+                {variable}.symbol,
+                {variable}.id,
+                {variable}.vid,
+                {variable}.gene_full_name,
+                {variable}.alias,
+                {variable}.synonym
+            ] WHERE value IS NOT NULL AND toLower(toString(value)) = toLower({parameter}))
+            OR any(value IN coalesce({variable}.aliases, []) + coalesce({variable}.synonyms, [])
+                WHERE value IS NOT NULL AND toLower(toString(value)) = toLower({parameter}))
+        )
     """
 
 
