@@ -22,6 +22,7 @@ from app.schemas.graph import (
 )
 from app.services.embedding_client import EmbeddingClientError
 from app.services.graph_service import GraphService
+from app.services.rerank_client import RerankClientError
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ def search_nodes(
 ) -> GraphLLMTextResponse | GraphQueryResponse:
     try:
         return service.search_exact_node(payload)
-    except EmbeddingClientError as exc:
+    except (EmbeddingClientError, RerankClientError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

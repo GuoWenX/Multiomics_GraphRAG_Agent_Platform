@@ -92,6 +92,8 @@ const editingDatasetName = ref("");
 
 const graphQuery = ref("");
 const graphDepth = ref(2);
+const graphVectorSearch = ref(true);
+const graphRerank = ref(true);
 const graphLimit = 200;
 const graphStatus = ref("ready");
 const graphData = ref({ nodes: [], relationships: [], warnings: [] });
@@ -961,7 +963,12 @@ async function runGraphSearch() {
         direction: "both",
         limit: graphLimit,
         include_properties: true,
-        llm_text: false
+        llm_text: false,
+        vector_search: graphVectorSearch.value || graphRerank.value,
+        top_k: 20,
+        rerank: graphRerank.value,
+        vector_top_k: 20,
+        rerank_top_n: 2
       });
       addGraphSearchResult(query, response);
       warnings.push(...(response.warnings || []));
@@ -2981,6 +2988,14 @@ function formatDate(value) {
                 max="5"
                 step="1"
               />
+            </label>
+            <label class="graph-search-toggle">
+              <input v-model="graphVectorSearch" type="checkbox" />
+              <span>向量</span>
+            </label>
+            <label class="graph-search-toggle">
+              <input v-model="graphRerank" type="checkbox" />
+              <span>重排</span>
             </label>
             <button class="primary-button" type="button" @click="runGraphSearch">
               <Search :size="18" />

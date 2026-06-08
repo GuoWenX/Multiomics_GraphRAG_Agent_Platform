@@ -766,6 +766,27 @@ button {
   text-align: center;
 }
 
+.graph-search-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  user-select: none;
+}
+
+.graph-search-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--green);
+}
+
 .upload-actions label,
 .upload-field {
   display: grid;

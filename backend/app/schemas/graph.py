@@ -37,6 +37,9 @@ class NodeSearchRequest(NameInputModel):
     llm_text: bool = True
     vector_search: bool = False
     top_k: int = Field(default=5, ge=1, le=100)
+    rerank: bool = False
+    vector_top_k: int = Field(default=20, ge=1, le=100)
+    rerank_top_n: int = Field(default=2, ge=1, le=100)
 
 
 class NodeDetailRequest(NameInputModel):

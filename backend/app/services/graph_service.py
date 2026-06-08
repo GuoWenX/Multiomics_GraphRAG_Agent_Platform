@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.core.neo4j_client import verify_neo4j_connectivity
@@ -27,6 +28,7 @@ from app.schemas.graph import (
     RelationshipQueryRequest,
 )
 from app.services.embedding_client import EmbeddingClient, EmbeddingProvider
+from app.services.rerank_client import RerankClient, RerankProvider
 from app.services.semantic_retrieval import SemanticRetrievalConfig, load_semantic_retrieval_config
 
 
@@ -35,11 +37,13 @@ class GraphService:
         self,
         repository: GraphRepository | None = None,
         embedding_client: EmbeddingProvider | None = None,
+        rerank_client: RerankProvider | None = None,
         semantic_config: SemanticRetrievalConfig | None = None,
     ):
         self.repository = repository or GraphRepository()
         self.semantic_config = semantic_config or load_semantic_retrieval_config()
         self.embedding_client = embedding_client or EmbeddingClient(self.semantic_config.embedding)
+        self.rerank_client = rerank_client or RerankClient(self.semantic_config.rerank)
 
     def check_health(self) -> None:
         verify_neo4j_connectivity()
@@ -79,7 +83,14 @@ class GraphService:
 
     def search_vector_node(self, request: NodeSearchRequest) -> GraphQueryResponse | GraphLLMTextResponse:
         names = request_names(request.name)
-        matched = self._find_vector_nodes(names, request.labels, request.top_k)
+        matched = self._find_vector_nodes(
+            names,
+            request.labels,
+            top_k=request.top_k,
+            rerank=request.rerank,
+            vector_top_k=request.vector_top_k,
+            rerank_top_n=request.rerank_top_n,
+        )
         graph = {"nodes": matched, "relationships": []}
         if request.depth > 0:
             graph = self._get_neighborhoods_by_node_ids(
@@ -318,25 +329,71 @@ class GraphService:
             nodes.extend(self.repository.find_exact_nodes(name, labels=labels, limit=limit))
         return merge_nodes(nodes)
 
-    def _find_vector_nodes(self, names: list[str], labels: list[str], top_k: int) -> list[dict[str, Any]]:
-        nodes: list[dict[str, Any]] = []
+    def _find_vector_nodes(
+        self,
+        names: list[str],
+        labels: list[str],
+        *,
+        top_k: int,
+        rerank: bool = False,
+        vector_top_k: int = 20,
+        rerank_top_n: int = 2,
+    ) -> list[dict[str, Any]]:
+        exact_nodes: list[dict[str, Any]] = []
+        vector_nodes: list[dict[str, Any]] = []
+        candidate_top_k = vector_top_k if rerank else top_k
         for name in names:
-            for node in self.repository.find_exact_nodes(name, labels=labels, limit=top_k):
-                exact_node = dict(node)
-                exact_node["score"] = 1.0
-                nodes.append(exact_node)
+            for exact_query in exact_node_queries(name):
+                for node in self.repository.find_exact_nodes(exact_query, labels=labels, limit=candidate_top_k):
+                    exact_node = dict(node)
+                    exact_node["score"] = 1.0
+                    exact_nodes.append(exact_node)
             embedding = self._embed_text(name, True)
             if embedding is None:
                 continue
-            nodes.extend(
+            vector_nodes.extend(
                 self.repository.vector_search_nodes(
                     index_name=self.semantic_config.embedding.node_index,
                     query_embedding=embedding,
                     labels=labels,
-                    top_k=top_k,
+                    top_k=candidate_top_k,
                 )
             )
-        return merge_nodes_by_best_score(nodes)[:top_k]
+        exact_candidates = merge_nodes(exact_nodes)
+        vector_candidates = merge_nodes_by_best_score(vector_nodes)[:candidate_top_k]
+        if exact_candidates:
+            exact_ids = {str(node["id"]) for node in exact_candidates}
+            remaining = [node for node in vector_candidates if str(node["id"]) not in exact_ids]
+            if not rerank:
+                return merge_nodes(exact_candidates, remaining)[:top_k]
+            if len(exact_candidates) >= rerank_top_n:
+                return exact_candidates[:rerank_top_n]
+            reranked_remaining = self._rerank_nodes(
+                format_query(names),
+                remaining,
+                rerank_top_n - len(exact_candidates),
+            )
+            return merge_nodes(exact_candidates, reranked_remaining)[:rerank_top_n]
+
+        candidates = vector_candidates
+        if not rerank:
+            return candidates[:top_k]
+        return self._rerank_nodes(format_query(names), candidates, rerank_top_n)
+
+    def _rerank_nodes(self, query: str, nodes: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
+        if not nodes:
+            return []
+        texts = [build_node_rerank_text(node) for node in nodes]
+        results = self.rerank_client.rerank(query, texts, top_n=top_n)
+        if not results:
+            return nodes[:top_n]
+        ranked_nodes = []
+        for result in results:
+            if 0 <= result.index < len(nodes):
+                node = dict(nodes[result.index])
+                node["rerank_score"] = result.score
+                ranked_nodes.append(node)
+        return ranked_nodes[:top_n] if ranked_nodes else nodes[:top_n]
 
     def _get_neighborhoods_by_exact_names(
         self,
@@ -501,6 +558,16 @@ def request_names(value: str | list[str]) -> list[str]:
     return [value] if isinstance(value, str) else value
 
 
+def exact_node_queries(value: str) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+    append_unique(queries, seen, value)
+    for token in re.split(r"[^0-9A-Za-z_.-]+", value):
+        if len(token) >= 2 and any(char.isalpha() for char in token):
+            append_unique(queries, seen, token)
+    return queries
+
+
 def format_query(value: str | list[str]) -> str:
     return value if isinstance(value, str) else ", ".join(value)
 
@@ -511,11 +578,17 @@ def build_node_embedding_text(labels: list[str], properties: dict[str, Any], exp
     node_type = semantic_node_type(labels, properties)
     if node_type == "Measurement":
         return ""
-    fields = NODE_EMBEDDING_FIELDS.get(node_type)
-    if fields is None:
-        fields = ("name", "description")
-    parts = [f"node_type: {node_type}"] if node_type else []
-    append_embedding_fields(parts, properties, fields)
+    return clean_embedding_value(properties.get("name"))
+
+
+def build_node_rerank_text(node: dict[str, Any]) -> str:
+    properties = dict(node.get("properties") or {})
+    labels = list(node.get("labels") or [])
+    node_type = semantic_node_type(labels, properties)
+    parts = [f"name: {node_display_name(node)}"]
+    if node_type:
+        parts.append(f"node_type: {node_type}")
+    append_embedding_fields(parts, properties, NODE_EMBEDDING_FIELDS.get(node_type, ("description",)))
     return "\n".join(parts)
 
 
