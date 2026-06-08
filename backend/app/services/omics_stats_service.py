@@ -13,7 +13,6 @@ from app.services.omics_stats.stats_engine import Comparison, analyze_omics
 class OmicsStatsService:
     def preview_content(self, content: bytes) -> PreviewResponse:
         parsed = read_workbook(content)
-        sheet_groups: dict[str, set[str]] = {}
         all_groups: set[str] = set()
         sheets = []
         for omics_type, features in parsed.omics_data.items():
@@ -23,14 +22,13 @@ class OmicsStatsService:
                 for group, values in group_values.items()
                 if values
             })
-            sheet_groups[omics_type] = set(groups)
             all_groups.update(groups)
             sheets.append({
                 "name": omics_type,
                 "feature_count": len(features),
                 "groups": groups,
             })
-        groups = sorted(parsed.group_descriptions) or sorted(all_groups)
+        groups = sorted(all_groups)
         comparisons = [
             {
                 "reference_group": reference,
@@ -42,6 +40,9 @@ class OmicsStatsService:
         ]
         can_analyze = bool(sheets) and len(groups) >= 2 and any(sheet["feature_count"] > 0 for sheet in sheets)
         warnings = list(parsed.warnings)
+        described_groups_without_samples = sorted(set(parsed.group_descriptions) - all_groups)
+        for group in described_groups_without_samples:
+            warnings.append(f"实验组 {group} 在实验组说明中存在，但没有匹配到样本列，已从可选比较中排除")
         if not sheets:
             warnings.append("未发现可解析的组学数据工作表")
         if len(groups) < 2:
@@ -57,18 +58,46 @@ class OmicsStatsService:
 
     def analyze_content(self, content: bytes, payload: AnalyzeRequest) -> AnalyzeResponse:
         parsed = read_workbook(content)
-        comparisons = [Comparison(c.reference_group, c.test_group) for c in payload.comparisons] or None
-        results, stat_warnings = analyze_omics(
-            parsed.omics_data,
-            comparisons=comparisons,
-            top_n=payload.top_n,
-            test_method=payload.test_method,
-            p_adjust_method=payload.p_adjust_method,
-            rank_by=payload.rank_by,
-        )
+        available_groups = {
+            group
+            for features in parsed.omics_data.values()
+            for group_values in features.values()
+            for group, values in group_values.items()
+            if values
+        }
+        requested_comparisons = [Comparison(c.reference_group, c.test_group) for c in payload.comparisons]
+        invalid_comparisons = [
+            comparison
+            for comparison in requested_comparisons
+            if comparison.reference_group not in available_groups or comparison.test_group not in available_groups
+        ]
+        valid_comparisons = [
+            comparison
+            for comparison in requested_comparisons
+            if comparison.reference_group in available_groups and comparison.test_group in available_groups
+        ]
+        comparisons = valid_comparisons if requested_comparisons else None
+        if requested_comparisons and not valid_comparisons:
+            results, stat_warnings = [], []
+        else:
+            results, stat_warnings = analyze_omics(
+                parsed.omics_data,
+                comparisons=comparisons,
+                top_n=payload.top_n,
+                test_method=payload.test_method,
+                p_adjust_method=payload.p_adjust_method,
+                rank_by=payload.rank_by,
+            )
+        validation_warnings = [
+            (
+                f"已跳过无可用样本的比较 {comparison.test_group}_vs_{comparison.reference_group}；"
+                "请确认两个实验组都有匹配的样本列"
+            )
+            for comparison in invalid_comparisons
+        ]
         return AnalyzeResponse(
             group_descriptions=parsed.group_descriptions,
-            warnings=parsed.warnings + stat_warnings,
+            warnings=parsed.warnings + validation_warnings + stat_warnings,
             results=results,
         )
 
